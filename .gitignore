@@ -1,0 +1,9 @@
+node_modules/
+__pycache__/
+*.db
+.env
+venv/
+.venv/
+dist/
+models/*.pkl
+ml/synthetic_ed.csv
