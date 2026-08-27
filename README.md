@@ -87,8 +87,8 @@ override, and prescription.
 ## 🚀 Run It Locally
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/patient-triage-ai.git
-cd patient-triage-ai
+git clone https://github.com/ashhhhhwtha/Patient-Triage.ai.git
+cd Patient-Triage.ai
 ```
 
 **Backend** (terminal 1):
