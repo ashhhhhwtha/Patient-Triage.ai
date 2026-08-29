@@ -18,6 +18,7 @@ export const postPrescription = (rx) => api.post("/prescriptions", rx).then((r) 
 export const getPrescription = (id) => api.get(`/prescriptions/${id}`).then((r) => r.data);
 export const getAudit = () => api.get("/audit").then((r) => r.data);
 export const triggerSurge = () => api.post("/patients/demo/surge").then((r) => r.data);
+export const getHistory = (id) => api.get(`/patients/${id}/history`).then((r) => r.data);
 
 // Live updates: server pushes {event, data}; we hand every message to the app.
 export function connectWS(onEvent, onStatus) {

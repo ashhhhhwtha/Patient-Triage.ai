@@ -3,16 +3,92 @@ ambiguous presentation, pediatric + geriatric cases, zero-history patients, ambu
 arrivals — plus ONE pre-captured nurse override so the audit trail demonstrates the
 override->log requirement the moment a judge opens the app.
 
+NEW: 4 COMPLETED PRIOR VISITS seeded first (backdated, with prescriptions), so the
+Doctor Console's "Previous visits" panel demonstrates on first view:
+  - Ramesh Kalita  : prior exertional chest pain  -> RELATED to today's crushing chest pain
+  - Farhan Ali     : prior wheezing / night cough -> RELATED to today's asthma attack
+  - Anjali Roy     : prior lower back pain        -> RELATED to today's back pain flare-up
+  - Lakshmi Gogoi  : prior knee arthritis flare   -> UNRELATED to today's fever + cough
+
 Run from backend:  python seed.py
+(For a clean demo, delete the old SQLite database file first, then run seed.py.)
 """
+from datetime import datetime, timedelta
 from app.db import SessionLocal, Base, engine
-from app.models import Patient, VitalsReading, TriageResult, Override, AuditLog
+from app.models import Patient, VitalsReading, TriageResult, Override, AuditLog, Prescription
 from app.triage.engine import run_triage
 
 Base.metadata.create_all(bind=engine)
 db = SessionLocal()
 
+# ---------------------------------------------------------------------------
+# PRIOR (COMPLETED) VISITS — these power the Doctor Console history panel.
+# Linked to today's patients by name+age (demo); production: MRN/ABHA via EHR.
+# ---------------------------------------------------------------------------
+PRIOR_VISITS = [
+    # RELATED: same cardiac story, four months earlier
+    dict(name="Ramesh Kalita", age=58, gender="M",
+         concern="Chest pain while climbing stairs, settled after rest",
+         pain=5, source="kiosk", appearance=[], has_history=False, days_ago=126,
+         vitals=dict(hr=94, bp_sys=138, bp_dia=88, spo2=97, temp=36.8),
+         doctor="Dr. A. Choudhury",
+         rx="Diagnosis: Exertional chest pain — stable angina suspected.\n"
+            "Rx:\n1. Tab Ecosprin 75 mg — once daily after food\n"
+            "2. Tab Sorbitrate 5 mg — under the tongue if pain recurs\n"
+            "Advice: Cardiology OPD in 1 week; treadmill test advised."),
+    # RELATED: same respiratory story, two months earlier
+    dict(name="Farhan Ali", age=8, gender="M",
+         concern="Wheezing and night cough for one week, worse with play",
+         pain=2, source="kiosk", appearance=[], has_history=False, days_ago=64,
+         vitals=dict(hr=118, bp_sys=100, bp_dia=64, spo2=95, temp=37.0),
+         doctor="Dr. S. Bhattacharya",
+         rx="Diagnosis: Childhood asthma — poorly controlled.\n"
+            "Rx:\n1. Salbutamol inhaler with spacer — 2 puffs when wheezy\n"
+            "2. Budesonide inhaler — 1 puff twice daily\n"
+            "Advice: Inhaler technique taught; review in 2 weeks."),
+    # RELATED: the "old problem" her today-concern refers to
+    dict(name="Anjali Roy", age=55, gender="F",
+         concern="Lower back pain after lifting a heavy pot at home",
+         pain=6, source="kiosk", appearance=[], has_history=False, days_ago=210,
+         vitals=dict(hr=80, bp_sys=130, bp_dia=84, spo2=98, temp=36.6),
+         doctor="Dr. M. Begum",
+         rx="Diagnosis: Mechanical low back pain, no red flags.\n"
+            "Rx:\n1. Tab Paracetamol 650 mg — twice daily for 5 days\n"
+            "Advice: Hot fomentation, avoid heavy lifting, physiotherapy referral."),
+    # UNRELATED: orthopedic history; today she presents with fever + cough
+    dict(name="Lakshmi Gogoi", age=72, gender="F",
+         concern="Knee swelling and stiffness, known arthritis, difficulty walking",
+         pain=5, source="kiosk", appearance=[], has_history=False, days_ago=95,
+         vitals=dict(hr=84, bp_sys=136, bp_dia=82, spo2=97, temp=36.7),
+         doctor="Dr. M. Begum",
+         rx="Diagnosis: Osteoarthritis flare, left knee.\n"
+            "Rx:\n1. Tab Paracetamol 650 mg — twice daily for 5 days\n"
+            "Advice: Knee X-ray done; orthopedic OPD follow-up in 3 weeks."),
+]
+
+print("Seeding prior (completed) visits for the history panel:")
+print("-" * 70)
+for s in PRIOR_VISITS:
+    days = s.pop("days_ago"); vit = s.pop("vitals")
+    rx_text = s.pop("rx"); doc_name = s.pop("doctor")
+    p = Patient(**s)
+    p.status = "completed"
+    p.arrived_at = datetime.utcnow() - timedelta(days=days)
+    db.add(p); db.flush()
+    db.add(VitalsReading(patient_id=p.id, **vit))
+    t = run_triage(p.age, vit, p.concern, p.pain, p.source, p.appearance, p.has_history)
+    db.add(TriageResult(patient_id=p.id, **t))
+    db.add(Prescription(patient_id=p.id, doctor=doc_name, text=rx_text))
+    db.add(AuditLog(actor="seed", action="register",
+                    detail=f"[prior visit, {days}d ago] {p.name} ({p.age}{p.gender}) "
+                           f"-> {t['category']} {t['specialty']} — completed, Rx on file"))
+    print(f"{p.name:22} {days:>3}d ago  {t['category']:10} {t['specialty']}")
+print()
+
+# ---------------------------------------------------------------------------
+# TODAY'S 16 WAITING PATIENTS (unchanged)
 # name age gender concern pain source appearance has_history vitals
+# ---------------------------------------------------------------------------
 SEED = [
     dict(name="Ramesh Kalita", age=58, gender="M", concern="Crushing chest pain and sweating for 30 minutes",
          pain=9, source="ambulance", appearance=["pale", "sweating"], has_history=True,
@@ -105,4 +181,6 @@ if priya_id:
     print("Pre-captured 1 nurse override (Priya Das) + audit entry - brief requirement met on first view.")
 
 db.commit()
-print(f"\nSeeded {len(SEED)} patients. Done.")
+print(f"\nSeeded {len(PRIOR_VISITS)} prior visits + {len(SEED)} waiting patients. Done.")
+print("History panel demo: open Doctor Console -> Ramesh Kalita / Farhan Ali / Anjali Roy (related)")
+print("and Lakshmi Gogoi (unrelated prior) — 'Previous visits' appears above the vitals.")

@@ -1,11 +1,17 @@
 """Phase 4: endpoints are async and broadcast over WebSocket after every change.
-Adds POST /patients/demo/surge — injects ~3x volume for the surge demo."""
+Adds POST /patients/demo/surge — injects ~3x volume for the surge demo.
+Adds GET /patients/{id}/history — previous-visit digest for the clinician:
+deterministic summarizer as the floor (runs offline), optional LLM simplification
+on top when a key exists. The summary NEVER decides severity — it surfaces
+history for clinical correlation, nothing more."""
 import random
+import re
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.models import Patient, VitalsReading, TriageResult
+from app.models import Patient, VitalsReading, TriageResult, Override, Prescription
 from app.schemas import PatientIn, VitalsIn
 from app.auth import require_role, get_current_user
 from app.audit import audit
@@ -42,6 +48,119 @@ def lookup_patient(name: str, age: int | None = None,
             "specialty": t.specialty if t else None,
         })
     return {"found": len(records) > 0, "records": records}
+
+# ---------------------------------------------------------------------------
+# Previous-visit history digest (shown on the Doctor Console)
+# ---------------------------------------------------------------------------
+# Words too generic to signal that two concerns are clinically related.
+_GENERIC_WORDS = {
+    "pain", "ache", "days", "weeks", "week", "since", "morning", "night",
+    "home", "problem", "feeling", "feels", "after", "last", "mild", "severe",
+    "today", "yesterday", "very", "also", "with", "without", "having",
+}
+
+def _kw(text: str) -> set:
+    """Meaningful keywords from a concern string (deterministic, auditable)."""
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower())
+            if len(w) >= 4 and w not in _GENERIC_WORDS}
+
+def _deterministic_summary(cur_spec, visits):
+    """The offline floor: a factual digest built purely from stored data.
+    States facts and flags recurrence — never advises, never decides."""
+    if not visits:
+        return "No previous visits on record — first-time presentation."
+    rel = [v for v in visits if v["related"]]
+    unrel = [v for v in visits if not v["related"]]
+    parts = [f"{len(visits)} previous visit{'s' if len(visits) != 1 else ''} on record."]
+    if rel:
+        items = "; ".join(f"\u201c{v['concern'][:70]}\u201d ({v['when']})" for v in rel)
+        parts.append(
+            f"{len(rel)} appear{'s' if len(rel) == 1 else ''} related to today's presentation"
+            + (f" ({cur_spec})" if cur_spec else "")
+            + f": {items}. Recurring same-system history — surfaced for clinical correlation."
+        )
+    if unrel:
+        specs = sorted({v["specialty"] or "General" for v in unrel})
+        parts.append(f"{len(unrel)} unrelated ({', '.join(specs)}).")
+    if any(v["override"] for v in visits):
+        parts.append("One prior visit carried a nurse override — see details below.")
+    return " ".join(parts)
+
+def _try_llm_summary(p, cur_spec, visits):
+    """Optional garnish: if an LLM key is configured, simplify the digest into
+    2-3 kind, plain sentences. STRICT: facts only, no advice, no severity.
+    Any failure falls silently back to the deterministic summary."""
+    try:
+        from app.routers.transcribe import GROQ_KEY, GEMINI_KEY, _llm
+        if not (GROQ_KEY or GEMINI_KEY):
+            return None
+        import json as _json
+        prompt = (
+            "You are simplifying a patient's previous hospital visits for a busy ED doctor "
+            "who has five seconds to read.\n"
+            "STRICT RULES: use ONLY the facts given below. Do NOT add diagnoses, medicines, "
+            "doses, or advice. Do NOT decide or suggest urgency.\n"
+            "Write 2-3 short plain-text sentences: how many prior visits, which relate to "
+            "today's concern and why (same body system / specialty / recurring symptom), and "
+            "anything notable such as a prior nurse override.\n"
+            f"Today's concern: {p.concern}\n"
+            f"Today's routed specialty: {cur_spec}\n"
+            f"Prior visits (JSON):\n{_json.dumps(visits, default=str)}"
+        )
+        text = _llm(prompt).strip()
+        return text or None
+    except Exception:
+        return None
+
+@router.get("/{patient_id}/history")
+def patient_history(patient_id: int, db: Session = Depends(get_db),
+                    user=Depends(require_role("nurse", "doctor"))):
+    """Previous-visit digest for the clinician reviewing this patient.
+    Linked by exact name (+/-2y age) for the DEMO — production links via
+    MRN/ABHA number through the hospital EHR, never name-matching."""
+    p = db.get(Patient, patient_id)
+    if not p:
+        raise HTTPException(404, "Patient not found")
+
+    cur = (db.query(TriageResult).filter_by(patient_id=p.id)
+             .order_by(TriageResult.created_at.desc()).first())
+    cur_spec = cur.specialty if cur else None
+    cur_kw = _kw(p.concern)
+
+    priors = (db.query(Patient)
+                .filter(Patient.status == "completed", Patient.id != p.id)
+                .filter(func.lower(Patient.name) == (p.name or "").strip().lower())
+                .order_by(Patient.arrived_at.desc())
+                .all())
+    priors = [m for m in priors if abs((m.age or 0) - (p.age or 0)) <= 2][:5]
+
+    visits = []
+    for m in priors:
+        t = (db.query(TriageResult).filter_by(patient_id=m.id)
+               .order_by(TriageResult.created_at.desc()).first())
+        o = (db.query(Override).filter_by(patient_id=m.id)
+               .order_by(Override.created_at.desc()).first())
+        rx = (db.query(Prescription).filter_by(patient_id=m.id)
+                .order_by(Prescription.created_at.desc()).first())
+        overlap = cur_kw & _kw(m.concern)
+        same_spec = bool(cur_spec and t and t.specialty == cur_spec)
+        related = bool(overlap) or same_spec
+        visits.append({
+            "id": m.id,
+            "when": m.arrived_at.strftime("%d %b %Y") if m.arrived_at else "unknown date",
+            "concern": m.concern,
+            "category": t.category if t else "lower",
+            "specialty": t.specialty if t else None,
+            "related": related,
+            "matched_on": (sorted(overlap) if overlap else (["same specialty"] if same_spec else [])),
+            "override": (f"{o.from_category} -> {o.to_category}: {o.reason}" if o else None),
+            "prescription": ((rx.text[:120] + ("…" if len(rx.text) > 120 else "")) if rx else None),
+        })
+
+    llm = _try_llm_summary(p, cur_spec, visits) if visits else None
+    summary = llm or _deterministic_summary(cur_spec, visits)
+    return {"patient_id": p.id, "visits": visits,
+            "summary": summary, "llm_used": bool(llm)}
 
 def _triage_and_store(db, patient, vitals_dict):
     t = run_triage(patient.age, vitals_dict, patient.concern, patient.pain,

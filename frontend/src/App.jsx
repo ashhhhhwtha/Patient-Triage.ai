@@ -5,13 +5,13 @@ import {
   Mic, MicOff, Activity, Stethoscope, Ambulance, UserCheck, User,
   Monitor, FileText, Download, Bell, Clock, ShieldCheck, ChevronRight,
   Zap, RefreshCw, Check, HeartPulse, Thermometer, Wind, Gauge,
-  ClipboardList, LogOut, Wifi, WifiOff, AlertTriangle,
+  ClipboardList, LogOut, Wifi, WifiOff, AlertTriangle, History,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
 import {
   setToken, login, getQueue, registerPatient, postVitals, postOverride,
   postPrescription, getPrescription, getAudit, triggerSurge, connectWS,
-  transcribeAudio, extractFields, lookupPatient, getCompleted,
+  transcribeAudio, extractFields, lookupPatient, getCompleted, getHistory,
 } from "./api";
 
 /* ---------------- display maps (backend uses lowercase categories) ---------------- */
@@ -28,6 +28,7 @@ const ACCOUNTS = [
   { username: "nurse1", hint: "nurse123", label: "Nurse J. Kalita", role: "nurse" },
   { username: "doc1", hint: "doctor123", label: "Dr. A. Choudhury — Cardiology", role: "doctor" },
   { username: "doc2", hint: "doctor123", label: "Dr. S. Bhattacharya — Pediatrics", role: "doctor" },
+  { username: "doc3", hint: "doctor123", label: "Dr. M. Begum — Duty Doctor (all departments)", role: "doctor" },
   { username: "patient", hint: "patient123", label: "📱 Patient — my visit (phone view)", role: "patient" },
 ];
 
@@ -781,12 +782,63 @@ function NurseView({ queue, showToast }) {
 }
 
 /* ================================ DOCTOR ================================ */
+function HistoryPanel({ hist }) {
+  if (!hist) return null;
+  if (!hist.visits || hist.visits.length === 0) {
+    return (
+      <div className="mb-2 text-xs text-slate-500 bg-slate-50 rounded-lg p-2 flex items-center gap-1.5">
+        <History size={13} className="text-slate-400" /> First recorded visit — no prior history on file.
+      </div>
+    );
+  }
+  return (
+    <div className="mb-2 bg-violet-50 border border-violet-200 rounded-xl p-3">
+      <div className="text-[10px] font-bold uppercase tracking-wider text-violet-700 mb-1 flex items-center gap-1">
+        <History size={12} /> Previous visits · AI summary
+      </div>
+      <p className="text-xs text-slate-700 mb-2">{hist.summary}</p>
+      <div className="space-y-1.5 max-h-44 overflow-y-auto">
+        {hist.visits.map((v) => (
+          <div key={v.id} className="text-xs bg-white border border-violet-100 rounded-lg p-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-semibold">{v.when}</span>
+              <span className="text-slate-500">· {v.specialty || "—"} · {CAT_LABEL[v.category] || v.category}</span>
+              {v.related ? (
+                <span className="text-[10px] bg-violet-600 text-white px-1.5 py-0.5 rounded-full font-bold"
+                  title={v.matched_on?.length ? `Matched on: ${v.matched_on.join(", ")}` : ""}>
+                  related to today
+                </span>
+              ) : (
+                <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full font-semibold">unrelated</span>
+              )}
+            </div>
+            <div className="text-slate-600 mt-0.5">{v.concern}</div>
+            {v.override && <div className="text-[11px] text-amber-700 mt-0.5">Nurse override: {v.override}</div>}
+            {v.prescription && <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">Rx: {v.prescription}</div>}
+          </div>
+        ))}
+      </div>
+      <div className="text-[10px] text-slate-400 mt-1.5">
+        {hist.llm_used ? "Simplified by LLM (key detected) — facts only, never decides urgency." : "Deterministic digest — runs offline, fully auditable."}
+        {" "}Linked by name for the demo; production links via MRN/ABHA through the EHR.
+      </div>
+    </div>
+  );
+}
+
 function DoctorView({ queue, user, showToast }) {
   const [sel, setSel] = useState(null);
   const [rx, setRx] = useState("");
   const [busy, setBusy] = useState(false);
+  const [hist, setHist] = useState(null);
   const list = user.dept ? queue.filter((p) => p.specialty === user.dept) : queue;
   const p = list.find((x) => x.id === sel);
+
+  useEffect(() => {
+    if (!sel) { setHist(null); return; }
+    setHist(null);
+    getHistory(sel).then(setHist).catch(() => setHist({ visits: [], summary: "", llm_used: false }));
+  }, [sel]);
 
   const send = async () => {
     setBusy(true);
@@ -803,7 +855,7 @@ function DoctorView({ queue, user, showToast }) {
       <div className="bg-white rounded-2xl shadow-sm p-4">
         <h2 className="font-bold flex items-center gap-2 mb-2"><Stethoscope size={18} className="text-sky-700" /> {user.display}</h2>
         <div className="text-xs bg-sky-50 text-sky-800 rounded-lg px-3 py-2 mb-3">
-          {user.dept || "All departments"} console · {list.length} waiting · emergency cases first · you only see patients routed to your department
+          {user.dept || "All departments"} console · {list.length} waiting · emergency cases first · {user.dept ? "you only see patients routed to your department" : "duty officer — covering every department, emergencies first across the board"}
         </div>
         <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto">
           {list.length === 0 && <div className="p-4 text-xs text-slate-400">No waiting patients for {user.dept || "you"} right now.</div>}
@@ -828,6 +880,7 @@ function DoctorView({ queue, user, showToast }) {
               {p.specialty} · {CAT_LABEL[p.category]} · confidence {Math.round(p.confidence * 100)}% · est. wait {p.est_wait_min}m
             </div>
             <div className="bg-slate-50 rounded-xl p-3 text-sm mb-2">{p.concern}</div>
+            <HistoryPanel hist={hist} />
             <div className="text-xs text-slate-600 mb-2">
               Vitals: {p.vitals ? `HR ${p.vitals.hr} · BP ${p.vitals.bp_sys}/${p.vitals.bp_dia} · SpO₂ ${p.vitals.spo2}% · ${p.vitals.temp}°C` : "none captured"}
             </div>
