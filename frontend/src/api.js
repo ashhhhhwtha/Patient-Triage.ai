@@ -30,3 +30,18 @@ export function connectWS(onEvent, onStatus) {
   };
   return ws;
 }
+
+// --- Voice AI + returning-patient lookup ---
+export const transcribeAudio = (formData) =>
+  api.post("/transcribe", formData).then((r) => r.data);
+export const extractFields = (text) =>
+  api.post("/extract", { text }).then((r) => r.data);
+export const lookupPatient = (name, age) =>
+  api.get("/patients/lookup", { params: { name, age } }).then((r) => r.data);
+export const checkRx = (text) =>
+  api.post("/rx/check", { text }).then((r) => r.data);
+export const simplifyRx = (text, language) =>
+  api.post("/rx/simplify", { text, language }).then((r) => r.data);
+export const rxCheck = (text) => api.post("/rx/check", { text }).then((r) => r.data);
+export const rxExplain = (text) => api.post("/rx/explain", { text }).then((r) => r.data);
+export const getCompleted = () => api.get("/patients/completed").then((r) => r.data);

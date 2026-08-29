@@ -10,10 +10,13 @@ def _hash(pw: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", pw.encode(), b"triage-salt", 100_000).hex()
 
 USERS = {
-    "kiosk":  {"pw": _hash("kiosk123"),  "role": "kiosk",  "display": "Reception Kiosk"},
-    "nurse1": {"pw": _hash("nurse123"),  "role": "nurse",  "display": "Nurse J. Kalita"},
-    "doc1":   {"pw": _hash("doctor123"), "role": "doctor", "display": "Dr. A. Choudhury", "dept": "Cardiology"},
-    "doc2":   {"pw": _hash("doctor123"), "role": "doctor", "display": "Dr. S. Bhattacharya", "dept": "Pediatrics"},
+    "kiosk":   {"pw": _hash("kiosk123"),   "role": "kiosk",   "display": "Reception Kiosk"},
+    "nurse1":  {"pw": _hash("nurse123"),   "role": "nurse",   "display": "Nurse J. Kalita"},
+    "doc1":    {"pw": _hash("doctor123"),  "role": "doctor",  "display": "Dr. A. Choudhury", "dept": "Cardiology"},
+    "doc2":    {"pw": _hash("doctor123"),  "role": "doctor",  "display": "Dr. S. Bhattacharya", "dept": "Pediatrics"},
+    "doc3":    {"pw": _hash("doctor123"), "role": "doctor",  "display": "Dr. M. Begum (Duty Medical Officer)"},
+    # limited demo account: sees only the Patient Portal (their own "phone")
+    "patient": {"pw": _hash("patient123"), "role": "patient", "display": "Patient (demo phone)"},
 }
 
 def verify_login(username: str, password: str):

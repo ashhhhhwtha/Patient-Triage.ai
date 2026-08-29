@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from app.triage.rules import rules_floor, age_band
+from app.triage.synonyms import lay_terms
 
 CATS = ["emergency", "urgent", "lower"]  # index 0 = most severe
 
@@ -64,6 +65,14 @@ def run_triage(age, vitals, concern, pain, source, appearance, has_history):
     reasons = []
     v = vitals or {}
     band = age_band(age)
+
+    # LAY-LANGUAGE NORMALIZATION AT DECISION TIME: "100 elephants sitting on my
+    # chest" -> chest tightness + chest pain, no matter which form the text came
+    # from (kiosk, typed, ambulance, booking). Feeds BOTH the rules floor and scoring.
+    lay = sorted(lay_terms(concern))
+    if lay:
+        reasons.append(f"lay-language normalized: {', '.join(lay)}")
+        concern = (concern or "") + " | " + ", ".join(lay)
 
     # 1) RULES SAFETY FLOOR
     floor, rule_reasons = rules_floor(age, vitals, concern, pain, source)

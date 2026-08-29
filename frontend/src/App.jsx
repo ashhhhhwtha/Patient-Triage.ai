@@ -11,6 +11,7 @@ import { jsPDF } from "jspdf";
 import {
   setToken, login, getQueue, registerPatient, postVitals, postOverride,
   postPrescription, getPrescription, getAudit, triggerSurge, connectWS,
+  transcribeAudio, extractFields, lookupPatient, getCompleted,
 } from "./api";
 
 /* ---------------- display maps (backend uses lowercase categories) ---------------- */
@@ -27,6 +28,7 @@ const ACCOUNTS = [
   { username: "nurse1", hint: "nurse123", label: "Nurse J. Kalita", role: "nurse" },
   { username: "doc1", hint: "doctor123", label: "Dr. A. Choudhury — Cardiology", role: "doctor" },
   { username: "doc2", hint: "doctor123", label: "Dr. S. Bhattacharya — Pediatrics", role: "doctor" },
+  { username: "patient", hint: "patient123", label: "📱 Patient — my visit (phone view)", role: "patient" },
 ];
 
 const SAMPLE_VOICE = [
@@ -139,20 +141,18 @@ function VitalsCapture({ vitals, setVitals }) {
 
 /* ================================ LOGIN ================================ */
 function Login({ onLogin }) {
-  const [username, setUsername] = useState("");
-  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
 
-  const doLogin = async () => {
-    setBusy(true); setErr("");
+  const quick = async (a) => {
+    setBusy(a.username); setErr("");
     try {
-      const u = await login(username, pw);
+      const u = await login(a.username, a.hint);
       setToken(u.token);
-      onLogin({ ...u, username });
+      onLogin({ ...u, username: a.username });
     } catch (e) {
-      setErr(e?.response?.data?.detail || "Login failed — is the backend running on :8000?");
-    } finally { setBusy(false); }
+      setErr(e?.response?.data?.detail || "Login failed — is the backend running?");
+    } finally { setBusy(""); }
   };
 
   return (
@@ -162,27 +162,29 @@ function Login({ onLogin }) {
           <HeartPulse className="text-sky-600" size={24} />
           <h1 className="font-bold text-xl">PatientTriage.ai</h1>
         </div>
-        <p className="text-xs text-slate-500 mb-4">Sign in with your role account. Every action is recorded against your identity in the audit trail.</p>
-        <div className="grid grid-cols-2 gap-2 mb-3">
+        <p className="text-xs text-slate-500 mb-4">
+          Pick a role to explore the system — one click, no typing. Every action you take is
+          recorded against that identity in the audit trail.
+        </p>
+        <div className="grid grid-cols-1 gap-2 mb-2">
           {ACCOUNTS.map((a) => (
-            <button key={a.username} onClick={() => { setUsername(a.username); setErr(""); }}
-              className={`text-left p-2.5 rounded-xl border text-xs ${username === a.username ? "border-sky-600 bg-sky-50" : "border-slate-200 hover:border-slate-400"}`}>
-              <div className="font-bold">{a.label}</div>
-              <div className="text-slate-400">{a.username} · pw: {a.hint}</div>
+            <button key={a.username} onClick={() => quick(a)} disabled={!!busy}
+              className="text-left p-3 rounded-xl border border-slate-200 hover:border-sky-500 hover:bg-sky-50 disabled:opacity-50 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-sm">{a.label}</div>
+                <div className="text-[11px] text-slate-400 capitalize">{a.role} console</div>
+              </div>
+              <span className="text-xs font-semibold text-sky-700">
+                {busy === a.username ? "Signing in…" : "Enter →"}
+              </span>
             </button>
           ))}
         </div>
-        <Field label="Password">
-          <input type="password" className={inputCls} value={pw}
-            onChange={(e) => { setPw(e.target.value); setErr(""); }}
-            onKeyDown={(e) => e.key === "Enter" && doLogin()} placeholder="enter the password shown on the card" />
-        </Field>
-        {err && <div className="mt-2 text-xs text-red-600 font-semibold">{err}</div>}
-        <button onClick={doLogin} disabled={!username || !pw || busy}
-          className="mt-4 w-full bg-sky-700 hover:bg-sky-800 disabled:opacity-40 text-white font-semibold rounded-xl py-3">
-          {busy ? "Signing in…" : "Sign in"}
-        </button>
-        <p className="mt-3 text-[10px] text-slate-400">Demo accounts with visible passwords — production uses the hospital's staff directory (SSO).</p>
+        {err && <div className="mt-1 text-xs text-red-600 font-semibold">{err}</div>}
+        <p className="mt-3 text-[10px] text-slate-400">
+          One-click demo accounts (JWT role auth is real behind the scenes). Production uses
+          hospital staff SSO; patients receive a tokenized SMS link at check-in.
+        </p>
       </div>
     </div>
   );
@@ -228,7 +230,7 @@ export default function TriageApp() {
     return () => ws.close();
   }, [user, refresh]);
 
-  if (!user) return <Login onLogin={(u) => { setUser(u); setView(u.role === "kiosk" ? "kiosk" : u.role === "doctor" ? "doctor" : "board"); }} />;
+  if (!user) return <Login onLogin={(u) => { setUser(u); setView(u.role === "kiosk" ? "kiosk" : u.role === "doctor" ? "doctor" : u.role === "patient" ? "patient" : "board"); }} />;
 
   const allTabs = [
     { id: "board", label: "Queue Board", icon: Monitor, roles: ["nurse", "doctor"] },
@@ -236,7 +238,7 @@ export default function TriageApp() {
     { id: "ambulance", label: "Ambulance", icon: Ambulance, roles: ["kiosk", "nurse"] },
     { id: "nurse", label: "Nurse Review", icon: UserCheck, roles: ["nurse"] },
     { id: "doctor", label: "Doctor", icon: Stethoscope, roles: ["doctor"] },
-    { id: "patient", label: "Patient Portal", icon: User, roles: ["nurse", "doctor"] },
+    { id: "patient", label: "Patient Portal", icon: User, roles: ["patient"] },
     { id: "audit", label: "Audit Trail", icon: ClipboardList, roles: ["nurse", "doctor"] },
   ];
   const tabs = allTabs.filter((t) => t.roles.includes(user.role));
@@ -261,9 +263,11 @@ export default function TriageApp() {
             <span className={`flex items-center gap-1 px-2 py-1 rounded-full ${wsOk ? "bg-emerald-700" : "bg-red-700"}`}>
               {wsOk ? <Wifi size={12} /> : <WifiOff size={12} />} {wsOk ? "live" : "offline"}
             </span>
-            <button onClick={doSurge} className="bg-red-700 hover:bg-red-600 px-2 py-1 rounded-full flex items-center gap-1">
-              <Zap size={12} /> Simulate 3× surge
-            </button>
+            {user.role !== "patient" && (
+              <button onClick={doSurge} className="bg-red-700 hover:bg-red-600 px-2 py-1 rounded-full flex items-center gap-1">
+                <Zap size={12} /> Simulate 3× surge
+              </button>
+            )}
             <span className="bg-slate-800 px-2 py-1 rounded-full">{user.display}</span>
             <button onClick={() => { wsRef.current?.close(); setUser(null); }}
               className="bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded-full flex items-center gap-1">
@@ -412,7 +416,21 @@ function Kiosk({ onDone }) {
   const [vitals, setVitals] = useState(null);
   const [appearance, setAppearance] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [welcome, setWelcome] = useState(null);   // returning-patient record
+  const [looking, setLooking] = useState(false);
   const recRef = useRef(null);
+
+  const findRecord = async () => {
+    setLooking(true); setWelcome(null);
+    try {
+      const r = await lookupPatient(form.name, Number(form.age) || undefined);
+      if (r.found) {
+        setWelcome(r.records[0]);
+        setForm((f) => ({ ...f, has_history: true }));
+      } else setWelcome({ none: true });
+    } catch { setWelcome({ none: true }); }
+    finally { setLooking(false); }
+  };
 
   const startVoice = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -442,8 +460,7 @@ function Kiosk({ onDone }) {
         fd.append("audio", blob, "speech.webm");
         setTranscript("Transcribing…");
         try {
-          const res = await fetch("http://localhost:8000/transcribe", { method: "POST", body: fd });
-          const data = await res.json();
+          const data = await transcribeAudio(fd);
           applyTranscript(data.text || "(no speech detected)");
         } catch { setTranscript("(Whisper unavailable — use the normal mic instead)"); }
       };
@@ -452,10 +469,32 @@ function Kiosk({ onDone }) {
   };
   const stopHDVoice = () => { mediaRef.current?.stop(); setRecording(false); };
 
-  const applyTranscript = (t) => {
-    const parsed = parseVoice(t);
-    setForm((f) => ({ ...f, name: parsed.name || f.name, age: parsed.age || f.age, gender: parsed.gender || f.gender, concern: t }));
+  const applyTranscript = async (t) => {
     setTranscript(t);
+    try {
+      // AI LAYER 2: LLM understands the messy speech -> structured fields + red flags.
+      // Red flags are appended into the concern so the RULES FLOOR sees them —
+      // the LLM informs triage; it never decides severity.
+      const d = await extractFields(t);
+      // normalized symptoms + red flags go INTO the concern text, so the
+      // triage engine's vocabulary matching and rules floor both see them
+      const extras = [
+        d.symptoms?.length ? `symptoms: ${d.symptoms.join(", ")}` : null,
+        d.red_flags?.length ? `red flags: ${d.red_flags.join(", ")}` : null,
+      ].filter(Boolean).join("; ");
+      const concern = extras ? `${d.concern} (${extras})` : d.concern;
+      setForm((f) => ({
+        ...f,
+        name: d.name || f.name,
+        age: d.age ?? f.age,
+        gender: d.gender || f.gender,
+        concern: concern || t,
+      }));
+    } catch {
+      // fallback: regex parsing — the demo can never break on an LLM hiccup
+      const parsed = parseVoice(t);
+      setForm((f) => ({ ...f, name: parsed.name || f.name, age: parsed.age || f.age, gender: parsed.gender || f.gender, concern: t }));
+    }
   };
 
   const submit = async () => {
@@ -527,10 +566,26 @@ function Kiosk({ onDone }) {
             <Field label="Concern (editable)">
               <textarea className={inputCls} rows={2} value={form.concern} onChange={(e) => setForm({ ...form, concern: e.target.value })} placeholder="e.g. chest pain since morning…" />
             </Field>
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={form.has_history} onChange={(e) => setForm({ ...form, has_history: e.target.checked })} />
-              I have visited this hospital before (record on file)
-            </label>
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={form.has_history} onChange={(e) => setForm({ ...form, has_history: e.target.checked })} />
+                I have visited this hospital before (record on file)
+              </label>
+              <button type="button" onClick={findRecord} disabled={!form.name || looking}
+                className="text-xs bg-slate-800 hover:bg-slate-900 disabled:opacity-40 text-white px-3 py-1.5 rounded-full font-semibold">
+                {looking ? "Searching…" : "🔎 Find my previous record"}
+              </button>
+            </div>
+            {welcome && !welcome.none && (
+              <div className="text-sm bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                <b>Welcome back, {welcome.name}!</b> Last visit {String(welcome.last_visit).slice(0, 10)} — {welcome.concern}
+                {welcome.specialty ? ` (${welcome.specialty})` : ""}. Record linked — triage confidence improves with history.
+                <div className="text-[10px] text-slate-500 mt-1">Demo lookup by name. Production links via MRN/ABHA number through the hospital EHR — never name-matching.</div>
+              </div>
+            )}
+            {welcome?.none && (
+              <div className="text-xs text-slate-500 bg-slate-50 rounded-lg p-2">No previous record found — continuing as a first-time visit.</div>
+            )}
             <button onClick={() => setStep(2)} disabled={!form.concern}
               className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white font-semibold rounded-xl py-3 flex items-center justify-center gap-1">
               Next: vitals check <ChevronRight size={16} />
@@ -840,21 +895,27 @@ function BookingCard({ }) {
 }
 
 function PatientPortal({ queue, notifs }) {
-  const [me, setMe] = useState(null);          // patient id
-  const [cached, setCached] = useState(null);  // keep info after they leave the queue
+  const [mode, setMode] = useState("waiting");   // "waiting" | "prescription"
+  const [me, setMe] = useState(null);
   const [rxData, setRxData] = useState(null);
+  const [done, setDone] = useState([]);          // completed visits
 
-  const inQueue = queue.find((x) => x.id === Number(me));
-  const p = inQueue || cached;
+  useEffect(() => { getCompleted().then(setDone).catch(() => {}); }, [queue]);
+
+  const list = mode === "waiting" ? queue : done;
+  const p = list.find((x) => x.id === Number(me)) || null;
   const myNotifs = notifs.filter((n) => n.patient_id === Number(me));
+  const pos = mode === "waiting" && p
+    ? queue.filter((q) => q.specialty === p.specialty).findIndex((q) => q.id === p.id) + 1
+    : 0;
 
-  useEffect(() => { if (inQueue) { setCached(inQueue); setRxData(null); } }, [inQueue]);
   useEffect(() => {
-    // when a prescription event arrives for me, fetch it
-    if (me && myNotifs.some((n) => n.type === "rx") && !rxData) {
-      getPrescription(Number(me)).then(setRxData).catch(() => {});
+    if (mode === "prescription" && p && !rxData) {
+      getPrescription(p.id).then(setRxData).catch(() => {});
     }
-  }, [me, myNotifs, rxData]);
+  }, [mode, p, rxData]);
+
+  const switchMode = (m) => { setMode(m); setMe(null); setRxData(null); };
 
   const downloadPDF = () => {
     if (!rxData || !p) return;
@@ -866,40 +927,49 @@ function PatientPortal({ queue, notifs }) {
     doc.text(doc.splitTextToSize(`Concern: ${p.concern}`, 170), 20, 49);
     doc.text(doc.splitTextToSize(rxData.text, 170), 20, 62);
     doc.setFontSize(9);
-    doc.text("Digitally signed · Logged in the hospital audit trail", 20, 285);
+    doc.text("Digitally signed - Logged in the hospital audit trail", 20, 285);
     doc.save(`prescription-${p.name.replace(/\s+/g, "-")}.pdf`);
   };
-
-  const pos = inQueue ? queue.filter((q) => q.specialty === inQueue.specialty).findIndex((q) => q.id === inQueue.id) + 1 : 0;
 
   return (
     <div className="grid lg:grid-cols-2 gap-4">
     <div className="bg-white rounded-2xl shadow-sm p-4">
-      <h2 className="font-bold flex items-center gap-2 mb-1"><User size={18} className="text-violet-600" /> My visit (patient phone view)</h2>
-      <Field label="Demo: pick which patient you are">
-        <select className={inputCls} value={me ?? ""} onChange={(e) => { setMe(e.target.value); setRxData(null); setCached(null); }}>
+      <h2 className="font-bold flex items-center gap-2 mb-2"><User size={18} className="text-violet-600" /> My visit (patient phone view)</h2>
+
+      {/* mode switch: waiting vs prescription */}
+      <div className="flex rounded-xl overflow-hidden border border-slate-300 text-sm font-semibold mb-3">
+        {[["waiting", "⏳ I'm waiting"], ["prescription", "💊 My prescription"]].map(([k, label]) => (
+          <button key={k} onClick={() => switchMode(k)}
+            className={`flex-1 py-2.5 ${mode === k ? "bg-violet-600 text-white" : "bg-white text-slate-600 hover:bg-slate-50"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <Field label={mode === "waiting" ? "Demo: pick which waiting patient you are" : "Demo: pick your completed visit"}>
+        <select className={inputCls} value={me ?? ""} onChange={(e) => { setMe(e.target.value); setRxData(null); }}>
           <option value="">—</option>
-          {queue.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.age}{t.gender})</option>)}
+          {list.map((t) => <option key={t.id} value={t.id}>{mode === "prescription" ? "✓ " : ""}{t.name} ({t.age}{t.gender})</option>)}
         </select>
       </Field>
-      {p && (
+      {mode === "prescription" && list.length === 0 && (
+        <p className="mt-2 text-xs text-slate-400">No completed consultations yet — once a doctor signs a prescription, the visit appears here.</p>
+      )}
+
+      {p && mode === "waiting" && (
         <div className="mt-3 space-y-3">
           <div className={`rounded-xl p-4 ${CAT_STYLE[p.category].light}`}>
             <div className="flex items-center justify-between">
               <CatBadge cat={p.category} escalated={p.escalated} />
               <ConfidenceRing value={p.confidence} color={CAT_STYLE[p.category].ring} />
             </div>
-            {inQueue ? (
-              <div className="mt-2 text-sm">
-                <div className="font-semibold">Queue position: #{pos} in {p.specialty}</div>
-                <div className="text-slate-600 flex items-center gap-1 mt-0.5">
-                  <Clock size={13} /> Estimated wait: <b>{p.est_wait_min} min</b> · waited {p.waited_min} min
-                </div>
-                <div className="text-[11px] text-slate-500 mt-1">Updates live. If your condition worsens, tell the desk immediately — you'll be re-assessed.</div>
+            <div className="mt-2 text-sm">
+              <div className="font-semibold">Queue position: #{pos} in {p.specialty}</div>
+              <div className="text-slate-600 flex items-center gap-1 mt-0.5">
+                <Clock size={13} /> Estimated wait: <b>{p.est_wait_min} min</b> · waited {p.waited_min} min
               </div>
-            ) : (
-              <div className="mt-2 text-sm font-semibold text-slate-700 flex items-center gap-1"><ShieldCheck size={15} className="text-emerald-600" /> Consultation complete</div>
-            )}
+              <div className="text-[11px] text-slate-500 mt-1">Updates live. If your condition worsens, tell the desk immediately — you'll be re-assessed.</div>
+            </div>
           </div>
           <div>
             <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1"><Bell size={13} /> Notifications</div>
@@ -910,7 +980,18 @@ function PatientPortal({ queue, notifs }) {
                 </div>
               ))}
           </div>
-          {rxData && (
+        </div>
+      )}
+
+      {p && mode === "prescription" && (
+        <div className="mt-3 space-y-3">
+          <div className="rounded-xl p-4 bg-emerald-50 border border-emerald-200">
+            <div className="text-sm font-semibold text-slate-700 flex items-center gap-1">
+              <ShieldCheck size={15} className="text-emerald-600" /> Consultation complete — {p.specialty}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">{p.concern}</div>
+          </div>
+          {rxData ? (
             <div className="border border-slate-200 rounded-xl p-3">
               <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Prescription · {rxData.doctor}</div>
               <pre className="text-xs whitespace-pre-wrap bg-slate-50 rounded-lg p-2 mb-2">{rxData.text}</pre>
@@ -918,6 +999,8 @@ function PatientPortal({ queue, notifs }) {
                 <Download size={15} /> Download prescription (PDF)
               </button>
             </div>
+          ) : (
+            <p className="text-xs text-slate-400">Fetching your prescription…</p>
           )}
         </div>
       )}

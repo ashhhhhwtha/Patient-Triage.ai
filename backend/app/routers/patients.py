@@ -14,15 +14,62 @@ from app.ws import manager
 
 router = APIRouter(prefix="/patients", tags=["patients"])
 
+@router.get("/lookup")
+def lookup_patient(name: str, age: int | None = None,
+                   db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Returning-patient recognition: search PREVIOUS (completed) visits by name
+    (+/- 2 years on age when given). Links the new check-in to prior history, which
+    raises triage confidence. DEMO ONLY by name — production links via MRN/ABHA
+    number through the hospital EHR, never name-matching (names misidentify)."""
+    term = (name or "").strip()
+    if len(term) < 3:
+        return {"found": False, "records": []}
+    q = (db.query(Patient)
+           .filter(Patient.status == "completed")
+           .filter(Patient.name.ilike(f"%{term}%"))
+           .order_by(Patient.arrived_at.desc()))
+    matches = q.all()
+    if age is not None:
+        matches = [m for m in matches if abs(m.age - age) <= 2]
+    records = []
+    for m in matches[:5]:
+        t = (db.query(TriageResult).filter_by(patient_id=m.id)
+               .order_by(TriageResult.created_at.desc()).first())
+        records.append({
+            "id": m.id, "name": m.name, "age": m.age, "gender": m.gender,
+            "last_visit": str(m.arrived_at), "concern": m.concern,
+            "category": t.category if t else None,
+            "specialty": t.specialty if t else None,
+        })
+    return {"found": len(records) > 0, "records": records}
+
 def _triage_and_store(db, patient, vitals_dict):
     t = run_triage(patient.age, vitals_dict, patient.concern, patient.pain,
                    patient.source, patient.appearance, patient.has_history)
     db.add(TriageResult(patient_id=patient.id, **t))
     return t
 
+@router.get("/completed")
+def completed_patients(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Recently completed visits — so the patient portal can show finished
+    consultations and their prescriptions, not just the waiting queue."""
+    rows = (db.query(Patient).filter(Patient.status == "completed")
+              .order_by(Patient.arrived_at.desc()).limit(50).all())
+    out = []
+    for m in rows:
+        t = (db.query(TriageResult).filter_by(patient_id=m.id)
+               .order_by(TriageResult.created_at.desc()).first())
+        out.append({"id": m.id, "name": m.name, "age": m.age, "gender": m.gender,
+                    "concern": m.concern, "category": t.category if t else "lower",
+                    "specialty": t.specialty if t else None,
+                    "confidence": t.confidence if t else 0.5,
+                    "escalated": t.escalated if t else False,
+                    "status": "completed"})
+    return out
+
 @router.post("")
 async def register_patient(body: PatientIn, db: Session = Depends(get_db),
-                           user=Depends(require_role("kiosk", "nurse", "doctor"))):
+                           user=Depends(require_role("kiosk", "nurse", "doctor", "patient"))):
     p = Patient(name=body.name, age=body.age, gender=body.gender, concern=body.concern,
                 pain=body.pain, has_history=body.has_history, source=body.source,
                 appearance=body.appearance)
